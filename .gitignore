@@ -1,0 +1,15 @@
+# Segredos / ambiente
+.env
+
+# Dados persistidos localmente (não versionar)
+data/
+*.sql
+*.log
+
+# Sistema
+.DS_Store
+Thumbs.db
+
+# k6
+loadtest/results/
+*.json.tmp
