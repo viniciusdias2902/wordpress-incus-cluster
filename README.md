@@ -58,9 +58,12 @@ make down
 
 ## Como rodar na VPS (Incus)
 
-Passo a passo completo em [`incus/README.md`](incus/README.md): criar a
-VM/container no cluster, instalar Docker, clonar este repo, e configurar o
-nginx do host com TLS (certbot) para `viniciusdias.tech`.
+Passo a passo completo em [`incus/README.md`](incus/README.md): instalar e
+habilitar o cluster Incus, criar o container com Docker, clonar este repo,
+expor a porta via proxy device e plugar o site em
+**https://viniciusdias.tech/loja/** sem mexer no portfolio/slides/tally
+existentes (trecho de nginx pronto em
+[`nginx/host-loja.snippet.conf`](nginx/host-loja.snippet.conf)).
 
 ## Testes de estresse
 
@@ -68,14 +71,14 @@ Rode **da sua máquina**, apontando para o domínio:
 
 ```bash
 # fumaça (sanidade)
-BASE_URL=https://viniciusdias.tech k6 run loadtest/smoke.js
+BASE_URL=https://viniciusdias.tech/loja k6 run loadtest/smoke.js
 
 # estresse (sobe até o ponto de quebra)
-BASE_URL=https://viniciusdias.tech k6 run loadtest/stress.js
+BASE_URL=https://viniciusdias.tech/loja k6 run loadtest/stress.js
 
 # salvando resultado bruto para o relatório
 mkdir -p loadtest/results
-BASE_URL=https://viniciusdias.tech \
+BASE_URL=https://viniciusdias.tech/loja \
   k6 run --out json=loadtest/results/3-replicas.json loadtest/stress.js
 ```
 
@@ -106,7 +109,8 @@ Acompanhe os recursos durante o teste com `htop` no host e `docker stats`
 ├── .env.example            # variáveis (copie para .env)
 ├── Makefile                # atalhos (up/scale/stress/...)
 ├── nginx/
-│   └── loadbalancer.conf   # round-robin via DNS do Docker
+│   ├── loadbalancer.conf   # round-robin via DNS do Docker (dentro do stack)
+│   └── host-loja.snippet.conf  # trecho p/ o nginx do HOST (subpath /loja)
 ├── loadtest/
 │   ├── smoke.js            # teste de sanidade
 │   └── stress.js           # teste de estresse (k6)

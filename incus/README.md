@@ -1,97 +1,157 @@
-# Rodando na VPS com Incus
+# Deploy no cluster Incus (VPS Hostinger)
 
-Este stack roda dentro de um container/VM do Incus na VPS. O modelo é:
+Guia para rodar o site sob **https://viniciusdias.tech/loja/**, ao lado do
+portfolio/slides/tally que já existem, sem derrubá-los.
+
+> **Por que container Incus e não VM:** a VPS já é uma KVM. Container Incus
+> (LXC) não precisa de virtualização aninhada, é leve e suficiente para
+> rodar Docker dentro (com `security.nesting=true`). Em 1–2 vCPU é a opção
+> estável.
 
 ```
-Internet → viniciusdias.tech
-              │
-        nginx do HOST  (TLS via certbot, porta 443/80)
-              │  proxy_pass http://<ip-do-container-incus>:8080
-              │
-        ┌─────┴─────────────────────────┐
-        │  Incus VM/container "web"      │
-        │   docker compose (este repo)   │
-        │   ├─ lb (nginx round-robin)    │
-        │   ├─ wordpress × N réplicas    │
-        │   └─ db (MariaDB)              │
-        └────────────────────────────────┘
+Internet → viniciusdias.tech (nginx do HOST, TLS certbot já existente)
+   ├─ location /          → portfolio (503)
+   ├─ location /slides/   → /var/www/slides
+   ├─ location /tally/    → :3000
+   └─ location /loja/     → 127.0.0.1:8080  ← NOVO (proxy device do Incus)
+                                  │
+                        ┌─────────▼──────────┐
+                        │ container Incus "web"│
+                        │  docker compose:     │
+                        │   lb → wordpress ×N  │
+                        │        └→ db (MariaDB)│
+                        └──────────────────────┘
 ```
 
-> Em 1–2 vCPU, rodar Docker dentro de **uma** VM Incus é o caminho mais
-> simples e estável. Se o trabalho exigir várias máquinas Incus de fato,
-> dá pra separar `db` em um container e as réplicas `wordpress` em outros —
-> veja a observação no fim.
-
-## 1. Criar a VM no cluster Incus
+## 1. Instalar o Incus
 
 ```bash
-# VM com Docker habilitado (nesting para containers)
-incus launch images:ubuntu/24.04 web --vm \
-  -c limits.cpu=2 -c limits.memory=4GiB
-
-# entrar na VM
-incus shell web
+sudo apt update
+sudo apt install -y incus
+sudo adduser $USER incus-admin     # relogue depois (newgrp incus-admin)
 ```
 
-## 2. Dentro da VM: instalar Docker e clonar o repo
+## 2. Inicializar e habilitar o cluster
 
 ```bash
+sudo incus admin init --minimal     # storage default + bridge incusbr0
+incus cluster enable web-cluster    # torna este nó um membro de cluster
+incus cluster list                  # confirma o membro ONLINE
+```
+
+## 3. Profile com nesting (para Docker dentro do container)
+
+```bash
+incus profile create docker
+incus profile set docker security.nesting=true
+incus profile set docker limits.cpu=2
+incus profile set docker limits.memory=4GiB
+```
+
+## 4. Criar o container e clonar o repo
+
+```bash
+incus launch images:ubuntu/24.04 web -p default -p docker
+incus shell web      # entra no container
+
+# --- dentro do container "web" ---
 apt update && apt install -y docker.io docker-compose-v2 git
-git clone <URL_DO_SEU_REPO_GITHUB> /opt/site
+git clone <URL_DO_SEU_REPO> /opt/site
 cd /opt/site
 cp .env.example .env
-# edite .env e defina senhas
-docker compose up -d                 # 1 réplica
-# docker compose up -d --scale wordpress=3   # 3 réplicas
 ```
 
-## 3. Descobrir o IP da VM (visto pelo host)
+Edite o `.env` dentro do container e ajuste:
+
+```ini
+WORDPRESS_DB_PASSWORD=uma_senha_forte
+LB_PORT=8080
+WP_HOME=https://viniciusdias.tech/loja
+WP_SITEURL=https://viniciusdias.tech/loja
+```
+
+Suba o stack (comece com 1 réplica):
 
 ```bash
-incus list web    # coluna IPV4
+docker compose up -d
+docker compose ps           # lb, wordpress, db de pé
+curl -s localhost:8080/lb-health   # -> ok
+exit                        # volta pro host
 ```
 
-## 4. nginx do HOST → VM (TLS do domínio)
+## 5. Expor a porta do container no host (proxy device)
 
-No **host** da VPS (não dentro da VM), com o domínio já apontando:
-
-```nginx
-server {
-    server_name viniciusdias.tech;
-    location / {
-        proxy_pass http://<IP_DA_VM>:8080;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-    }
-}
-```
+No **host** (não no container). Mapeia `127.0.0.1:8080` do host para o LB
+do container — IP estável, sobrevive a reinício:
 
 ```bash
-sudo certbot --nginx -d viniciusdias.tech
+incus config device add web proxy8080 proxy \
+  listen=tcp:127.0.0.1:8080 connect=tcp:127.0.0.1:8080
+curl -s 127.0.0.1:8080/lb-health    # -> ok (agora a partir do host)
 ```
 
-## 5. Concluir a instalação do WordPress
+## 6. nginx do host: adicionar /loja/
 
-Acesse `https://viniciusdias.tech` e finalize o wizard do WordPress.
+Cole o conteúdo de [`../nginx/host-loja.snippet.conf`](../nginx/host-loja.snippet.conf)
+**dentro** do server block `listen 443 ssl` em
+`/etc/nginx/sites-available/portfolio` (ao lado dos outros `location`).
+
+```bash
+sudo nginx -t && sudo systemctl reload nginx
+```
+
+Não precisa de cert novo: o subpath usa o certificado de `viniciusdias.tech`
+que o Certbot já gerencia.
+
+## 7. Concluir a instalação do WordPress
+
+Acesse **https://viniciusdias.tech/loja/** e finalize o wizard. Como
+`WP_HOME`/`WP_SITEURL` estão fixos no `.env`, o WordPress já grava as URLs
+sob `/loja` corretamente.
+
+## 8. Escalar réplicas (o experimento)
+
+Dentro do container `web`, em `/opt/site`:
+
+```bash
+docker compose up -d --scale wordpress=2
+docker compose up -d --scale wordpress=3
+```
+
+Rode os testes de estresse da **sua máquina** apontando para o domínio:
+
+```bash
+BASE_URL=https://viniciusdias.tech/loja k6 run loadtest/stress.js
+```
+
+Monitore no host com `htop` e dentro do container com `docker stats` para
+montar a matriz réplicas × req/s × p95 × erros.
 
 ---
 
-## Variação: réplicas em VMs Incus separadas (cluster "de verdade")
+## Variação: cluster Incus "de verdade" (vários containers)
 
-Para mostrar escala horizontal entre nós do cluster, em vez do `--scale`:
+Para demonstrar Incus orquestrando uma frota (e não só Docker escalando
+dentro de um container), separe os papéis em containers Incus distintos:
 
-1. `db` em uma VM dedicada (`incus launch ... db`).
-2. Uma VM por réplica de WordPress, todas com `WORDPRESS_DB_HOST` apontando
-   para o IP da VM do `db` e montando o **mesmo** `wp-content` via disco
-   compartilhado do Incus:
-   ```bash
-   incus storage volume create default wp-content
-   incus config device add web1 wpcontent disk \
-     pool=default source=wp-content path=/opt/site/wp-content
-   ```
-3. O `lb` (nginx) com `upstream` listando os IPs das VMs de WordPress.
+```bash
+# 1 container para o banco
+incus launch images:ubuntu/24.04 db -p default -p docker
+# N containers para a aplicação
+incus launch images:ubuntu/24.04 web1 -p default -p docker
+incus launch images:ubuntu/24.04 web2 -p default -p docker
+```
 
-Esse é o experimento que rende a melhor análise: medir 1 → 2 → 3 nós e ver
-onde o `db` único vira gargalo.
+- `db`: roda só o MariaDB; anote o IP com `incus list db`.
+- `web1..N`: rodam só o `wordpress`, com `WORDPRESS_DB_HOST=<IP do db>` e o
+  **mesmo** `wp-content` via volume compartilhado do Incus:
+  ```bash
+  incus storage volume create default wp-content
+  incus config device add web1 wpc disk pool=default \
+    source=wp-content path=/var/www/html/wp-content
+  # repita o device em web2..N
+  ```
+- nginx do host com `upstream` listando os IPs de `web1..N`.
+
+Esse cenário rende a melhor análise: ao medir 1 → 2 → 3 nós você mostra onde
+o `db` único vira o gargalo do cluster.

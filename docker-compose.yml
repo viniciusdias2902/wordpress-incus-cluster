@@ -41,10 +41,14 @@ services:
       WORDPRESS_DB_USER: ${WORDPRESS_DB_USER}
       WORDPRESS_DB_PASSWORD: ${WORDPRESS_DB_PASSWORD}
       # Confia no proxy: detecta HTTPS quando o nginx do host repassa o request.
+      # WP_HOME/WP_SITEURL fixam a URL pública (subpath /loja) para o WordPress
+      # gerar links corretos mesmo recebendo os requests "na raiz" (proxy strip).
       WORDPRESS_CONFIG_EXTRA: |
         if (isset($$_SERVER['HTTP_X_FORWARDED_PROTO']) && $$_SERVER['HTTP_X_FORWARDED_PROTO'] === 'https') {
             $$_SERVER['HTTPS'] = 'on';
         }
+        define('WP_HOME',    '${WP_HOME:-http://localhost:8080}');
+        define('WP_SITEURL', '${WP_SITEURL:-http://localhost:8080}');
     volumes:
       - wp_content:/var/www/html/wp-content
     networks:
