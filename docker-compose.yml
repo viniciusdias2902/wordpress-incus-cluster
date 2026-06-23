@@ -1,0 +1,71 @@
+# Stack do site WordPress preparado para teste de estresse.
+#
+# - db        : MariaDB (estado único, gargalo esperado do cluster)
+# - wordpress : aplicação stateless, replicável com --scale wordpress=N
+# - lb        : nginx em round-robin sobre as réplicas de wordpress
+#
+# As réplicas compartilham o volume wp_content (uploads/temas/plugins),
+# espelhando a estratégia de disco compartilhado do cluster Incus.
+#
+# Subir 1 réplica:   docker compose up -d
+# Subir 3 réplicas:  docker compose up -d --scale wordpress=3
+
+services:
+  db:
+    image: mariadb:11
+    restart: unless-stopped
+    environment:
+      MYSQL_DATABASE: ${WORDPRESS_DB_NAME}
+      MYSQL_USER: ${WORDPRESS_DB_USER}
+      MYSQL_PASSWORD: ${WORDPRESS_DB_PASSWORD}
+      MYSQL_RANDOM_ROOT_PASSWORD: "1"
+    volumes:
+      - db_data:/var/lib/mysql
+    networks:
+      - backend
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  wordpress:
+    image: wordpress:6-apache
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      WORDPRESS_DB_HOST: db
+      WORDPRESS_DB_NAME: ${WORDPRESS_DB_NAME}
+      WORDPRESS_DB_USER: ${WORDPRESS_DB_USER}
+      WORDPRESS_DB_PASSWORD: ${WORDPRESS_DB_PASSWORD}
+      # Confia no proxy: detecta HTTPS quando o nginx do host repassa o request.
+      WORDPRESS_CONFIG_EXTRA: |
+        if (isset($$_SERVER['HTTP_X_FORWARDED_PROTO']) && $$_SERVER['HTTP_X_FORWARDED_PROTO'] === 'https') {
+            $$_SERVER['HTTPS'] = 'on';
+        }
+    volumes:
+      - wp_content:/var/www/html/wp-content
+    networks:
+      - backend
+    # Sem 'ports': o acesso é sempre via load balancer (lb).
+
+  lb:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    depends_on:
+      - wordpress
+    ports:
+      - "${LB_PORT:-8080}:80"
+    volumes:
+      - ./nginx/loadbalancer.conf:/etc/nginx/conf.d/default.conf:ro
+    networks:
+      - backend
+
+volumes:
+  db_data:
+  wp_content:
+
+networks:
+  backend:
